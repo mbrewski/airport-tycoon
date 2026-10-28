@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Small Airport Tycoon</title>
+  <style>
+    :root {
+      --ink: #e8f0ea;
+      --muted: #8aa090;
+      --panel: rgba(10, 18, 14, 0.82);
+      --line: #2a3d30;
+      --ok: #7dcc7a;
+      --bad: #e07a6a;
+      --gold: #e6c36a;
+    }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b140f; color: var(--ink); font: 13px/1.4 "IBM Plex Sans", "Segoe UI", sans-serif; }
+    canvas { display: block; }
+    .hud { position: absolute; inset: 0; pointer-events: none; }
+    .hud > * { pointer-events: auto; }
+    #top {
+      position: absolute; top: 12px; left: 12px; right: 12px;
+      display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap;
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px 14px; backdrop-filter: blur(8px);
+    }
+    #stats { display: flex; gap: 18px; align-items: baseline; }
+    #stats strong { font-size: 16px; color: var(--gold); letter-spacing: 0.02em; }
+    #stats span.label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; display: block; }
+    #msg { color: var(--muted); max-width: 280px; }
+    #actions { display: flex; gap: 8px; align-items: center; }
+    #actions button {
+      background: transparent; border: 1px solid var(--line); color: var(--ink);
+      border-radius: 8px; padding: 8px 12px; cursor: pointer; font: inherit;
+    }
+    #actions button:hover { border-color: var(--ok); }
+    #actions button.danger:hover { border-color: var(--bad); color: var(--bad); }
+    #actions button[aria-pressed="false"] { color: var(--muted); }
+    #save-status { color: var(--muted); font-size: 11px; min-width: 4.6em; text-align: right; }
+    #yaw-label { color: var(--gold); font-variant-numeric: tabular-nums; min-width: 3.5em; }
+    #catalog {
+      position: absolute; left: 12px; bottom: 12px; top: 92px; width: 220px;
+      overflow: auto; display: flex; flex-direction: column; gap: 6px;
+    }
+    #catalog h2 { margin: 0 0 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
+    .tool {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      background: transparent; border: 1px solid var(--line); color: var(--ink);
+      border-radius: 8px; padding: 8px 10px; cursor: pointer; text-align: left; width: 100%;
+    }
+    .tool:hover, .tool.active { border-color: var(--ok); background: rgba(125,204,122,0.08); }
+    .tool .cost { color: var(--gold); font-variant-numeric: tabular-nums; }
+    .tool .hint { color: var(--muted); font-size: 11px; }
+    #log {
+      position: absolute; right: 12px; bottom: 12px; width: 280px; max-height: 38vh;
+      overflow: auto;
+    }
+    #log .row { color: var(--muted); font-size: 12px; padding: 3px 0; border-bottom: 1px solid #1c2a20; }
+    #log .row.money { color: var(--ok); }
+    #help {
+      position: absolute; right: 12px; top: 92px; width: 240px; color: var(--muted); font-size: 12px;
+    }
+    #loading {
+      position: absolute; inset: 0; display: grid; place-items: center;
+      background: #0b140f; z-index: 5; font-size: 15px; color: var(--muted);
+    }
+    #loading.hide { display: none; }
+  </style>
+</head>
+<body>
+  <div id="loading">Loading airfield kit…</div>
+  <div class="hud">
+    <div id="top">
+      <div class="card" id="stats"></div>
+      <div class="card" id="actions">
+        <span id="save-status" aria-live="polite"></span>
+        <button type="button" id="btn-sound" aria-pressed="true" title="Toggle sound (M)">Sound: On</button>
+        <button type="button" id="btn-rotate" title="Rotate 90° (R or right-click)">Rotate <span id="yaw-label">0°</span></button>
+        <button type="button" id="btn-reset" class="danger">Start over</button>
+        <button type="button" id="btn-logout">Log out</button>
+      </div>
+      <div class="card" id="msg">Place a runway, then parking. Traffic follows the pavement.</div>
+    </div>
+    <div class="card" id="catalog"></div>
+    <div class="card" id="help">
+      Click a tool, then the field. <b>Rotate</b> or <b>R</b> / right-click turns the piece 90°.
+      <b>Esc</b> cancel · <b>M</b> sound · drag to orbit · scroll to zoom. Demolish refunds 50%. Save is automatic.
+    </div>
+    <div class="card" id="log"></div>
+  </div>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { Sky } from 'three/addons/objects/Sky.js';
+
+    // +X east, +Z north, +Y up. Pack assets: nose toward +Z, ground at y=0.
+    const CELL = 10;
+    const GRID = 48;
+    const LEGACY_SAVE_KEY = 'airport-tycoon-v1';
+    const START_CASH = 500000;
+    const UP = new THREE.Vector3(0, 1, 0);
+
+    const ASSETS = {
+      trainer:  'https://cdn.3dassets.dev/assets/32564/v1/model.glb',
+      lowwing:  'https://cdn.3dassets.dev/assets/32568/v1/model.glb',
+      twin:     'https://cdn.3dassets.dev/assets/32569/v1/model.glb',
+      jet:      'https://cdn.3dassets.dev/assets/32589/v1/model.glb',
+      tug:      'https://cdn.3dassets.dev/assets/32834/v1/model.glb',
+      bowser:   'https://cdn.3dassets.dev/assets/32825/v1/model.glb',
+      runway:   'https://cdn.3dassets.dev/assets/32812/v1/model.glb',
+      threshold:'https://cdn.3dassets.dev/assets/32814/v1/model.glb',
+      taxi:     'https://cdn.3dassets.dev/assets/32815/v1/model.glb',
+      taxiTurn: 'https://cdn.3dassets.dev/assets/32816/v1/model.glb',
+      apron:    'https://cdn.3dassets.dev/assets/32817/v1/model.glb',
+      grass:    'https://cdn.3dassets.dev/assets/32818/v1/model.glb',
+      hangar:   'https://cdn.3dassets.dev/assets/32820/v1/model.glb',
+      tHangar:  'https://cdn.3dassets.dev/assets/32823/v1/model.glb',
+      tower:    'https://cdn.3dassets.dev/assets/32824/v1/model.glb',
+      club:     'https://cdn.3dassets.dev/assets/32826/v1/model.glb',
+      fuel:     'https://cdn.3dassets.dev/assets/32829/v1/model.glb',
+      windsock: 'https://cdn.3dassets.dev/assets/32827/v1/model.glb',
+      beacon:   'https://cdn.3dassets.dev/assets/32832/v1/model.glb',
+      helipad:  'https://cdn.3dassets.dev/assets/32821/v1/model.glb',
+      heliPiston: 'https://cdn.3dassets.dev/assets/32804/v1/model.glb',
+      heliTurbine:'https://cdn.3dassets.dev/assets/32802/v1/model.glb',
+      heliAmb:    'https://cdn.3dassets.dev/assets/32807/v1/model.glb',
+    };
+
+    const CATALOG = [
+      { id: 'runway',    name: 'Runway slab',     cost: 42000, w: 3, d: 1, kind: 'pavement', parking: 0, unique: false, hint: '30×10 m lit slab' },
+      { id: 'threshold', name: 'Threshold',       cost: 18000, w: 3, d: 1, kind: 'pavement', parking: 0, unique: false, hint: 'Numbers / lights' },
+      { id: 'grass',     name: 'Grass strip',     cost: 14000, w: 2, d: 1, kind: 'pavement', parking: 0, unique: false, hint: '20×10 m turf' },
+      { id: 'taxi',      name: 'Taxiway',         cost: 11000, w: 1, d: 1, kind: 'pavement', parking: 0, unique: false, hint: 'Blue edge lights' },
+      { id: 'taxiTurn',  name: 'Taxi turn',       cost: 13000, w: 1, d: 1, kind: 'pavement', parking: 0, unique: false, hint: 'Quarter turn' },
+      { id: 'apron',     name: 'Apron stand',     cost: 8000,  w: 1, d: 1, kind: 'parking',  parking: 1, unique: false, hint: 'Tiedown / hardstand' },
+      { id: 'helipad',   name: 'Helipad',         cost: 16000, w: 1, d: 1, kind: 'parking',  parking: 1, unique: false, hint: '10 m landing pad' },
+      { id: 'hangar',    name: 'Hangar bay',      cost: 62000, w: 1, d: 1, kind: 'parking',  parking: 2, unique: false, hint: 'Arch module' },
+      { id: 'tHangar',   name: 'T-hangar row',    cost: 98000, w: 2, d: 1, kind: 'parking',  parking: 4, unique: false, hint: 'Four nested bays' },
+      { id: 'tower',     name: 'Control tower',   cost: 125000,w: 1, d: 1, kind: 'amenity',  parking: 0, unique: true,  hint: 'Raises demand' },
+      { id: 'club',      name: 'Clubhouse',       cost: 52000, w: 1, d: 1, kind: 'amenity',  parking: 0, unique: false, hint: 'Weekend traffic' },
+      { id: 'fuel',      name: 'Fuel farm',       cost: 38000, w: 1, d: 1, kind: 'amenity',  parking: 0, unique: false, hint: 'Sells avgas' },
+      { id: 'windsock',  name: 'Windsock',        cost: 3500,  w: 1, d: 1, kind: 'prop',     parking: 0, unique: false, hint: 'Mast' },
+      { id: 'beacon',    name: 'Beacon',          cost: 7500,  w: 1, d: 1, kind: 'prop',     parking: 0, unique: false, hint: 'Rotating ident' },
+    ];
+
+    const FLEET = ['trainer', 'lowwing', 'twin', 'jet'];
+    const HELI_FLEET = ['heliPiston', 'heliTurbine', 'heliAmb'];
+    const CALLS = ['N21TY', 'N44GA', 'N90CK', 'N17LB', 'N5PT', 'N88RV', 'N3KM', 'N12HQ'];
+    const TAXI_IDS = new Set(['runway', 'threshold', 'grass', 'taxi', 'taxiTurn', 'apron', 'hangar', 'tHangar']);
+    const SOUND_KEY = 'airport-tycoon-sound';
+    const SOUND_FILES = {
+      prop: '/sounds/prop-loop.wav',
+      jet: '/sounds/jet-loop.wav',
+      takeoff: '/sounds/jet-takeoff.wav',
+    };
+
+    const state = {
+      cash: START_CASH,
+      day: 1,
+      dayT: 0,
+      tool: null,
+      yaw: 0,
+      demolish: false,
+      buildings: [],
+      aircraft: [],
+      occupancy: new Set(),
+      spawnT: 4,
+      paused: false,
+      hover: { cx: GRID / 2, cz: GRID / 2 },
+    };
+
+    const account = {
+      user: null,
+      lastSaved: '',
+      saveTimer: null,
+      saveChain: Promise.resolve(),
+    };
+
+    const sound = {
+      listener: null,
+      buffers: {},
+      enabled: (() => {
+        try { return localStorage.getItem(SOUND_KEY) !== 'off'; } catch { return true; }
+      })(),
+      master: 0.8,
+    };
+
+    const gltfs = {};
+    const mixers = [];
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const groundPlane = new THREE.Plane(UP, 0);
+    const hit = new THREE.Vector3();
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0xc5d6c8, 0.0016);
+    const camera = new THREE.PerspectiveCamera(42, innerWidth / innerHeight, 0.5, 4000);
+    camera.position.set(180, 160, 180);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+    document.body.prepend(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.maxPolarAngle = Math.PI * 0.46;
+    controls.minDistance = 40;
+    controls.maxDistance = 900;
+    controls.enableDamping = true;
+
+    const sky = new Sky();
+    sky.scale.setScalar(4500);
+    sky.material.uniforms.turbidity.value = 4;
+    sky.material.uniforms.rayleigh.value = 1.4;
+    sky.material.uniforms.mieCoefficient.value = 0.005;
+    sky.material.uniforms.sunPosition.value.set(80, 40, 30);
+    scene.add(sky);
+    scene.add(new THREE.HemisphereLight(0xcfe6ff, 0x3a4a30, 0.7));
+    const sun = new THREE.DirectionalLight(0xfff3d4, 1.35);
+    sun.position.set(120, 180, 80);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = sun.shadow.camera.bottom = -220;
+    sun.shadow.camera.right = sun.shadow.camera.top = 220;
+    scene.add(sun);
+
+    function grassTexture() {
+      const c = document.createElement('canvas');
+      c.width = c.height = 64;
+      const g = c.getContext('2d');
+      g.fillStyle = '#4a7a3a';
+      g.fillRect(0, 0, 64, 64);
+      for (let i = 0; i < 400; i++) {
+        g.fillStyle = i % 3 ? '#3d6b32' : '#5a8c44';
+        g.fillRect((Math.random() * 64) | 0, (Math.random() * 64) | 0, 2, 2);
+      }
+      const t = new THREE.CanvasTexture(c);
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.repeat.set(GRID, GRID);
+      t.colorSpace = THREE.SRGBColorSpace;
+      return t;
+    }
+
+    const field = new THREE.Mesh(
+      new THREE.PlaneGeometry(GRID * CELL, GRID * CELL),
+      new THREE.MeshLambertMaterial({ map: grassTexture() })
+    );
+    field.rotation.x = -Math.PI / 2;
+    field.receiveShadow = true;
+    scene.add(field);
+
+    const gridHelper = new THREE.GridHelper(GRID * CELL, GRID, 0x2e4a32, 0x2e4a32);
+    gridHelper.position.y = 0.04;
+    gridHelper.material.transparent = true;
+    gridHelper.material.opacity = 0.28;
+    scene.add(gridHelper);
+
+    const ghostRoot = new THREE.Group();
+    ghostRoot.visible = false;
+    scene.add(ghostRoot);
+    const ghostCache = {};
+    let ghostKey = null;
+
+    function makeGhostClone(key) {
+      const root = gltfs[key].scene.clone(true);
+      root.traverse((n) => {
+        if (!n.isMesh || !n.material) return;
+        const list = Array.isArray(n.material) ? n.material : [n.material];
+        const next = list.map((m) => {
+          const c = m.clone();
+          c.transparent = true;
+          c.opacity = 0.5;
+          c.depthWrite = false;
+          return c;
+        });
+        n.material = Array.isArray(n.material) ? next : next[0];
+        n.castShadow = false;
+        n.receiveShadow = false;
+        n.renderOrder = 3;
+      });
+      return root;
+    }
+
+    function setGhostAsset(key) {
+      if (ghostKey === key) return;
+      while (ghostRoot.children.length) ghostRoot.remove(ghostRoot.children[0]);
+      ghostKey = key;
+      if (!key || !gltfs[key]) {
+        ghostRoot.visible = false;
+        return;
+      }
+      if (!ghostCache[key]) ghostCache[key] = makeGhostClone(key);
+      ghostRoot.add(ghostCache[key]);
+    }
+
+    function tintGhost(ok) {
+      ghostRoot.traverse((n) => {
+        if (!n.isMesh || !n.material) return;
+        const list = Array.isArray(n.material) ? n.material : [n.material];
+        for (const m of list) {
+          m.opacity = 0.5;
+          if ('emissive' in m) m.emissive.setHex(ok ? 0x000000 : 0x882222);
+        }
+      });
+    }
+
+    const loader = new GLTFLoader();
+    function loadGLTF(url) {
+      return new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject));
+    }
+
+    function cloneAsset(key) {
+      const src = gltfs[key];
+      const root = src.scene.clone(true);
+      root.traverse((n) => {
+        if (n.isMesh) {
+          n.castShadow = true;
+          n.receiveShadow = true;
+          if (n.material) n.material = n.material.clone();
+        }
+      });
+      const mixer = new THREE.AnimationMixer(root);
+      for (const clip of src.animations) {
+        const name = clip.name.toLowerCase();
+        if (name.includes('spin') || name.includes('roll') || name.includes('beacon') || name.includes('sway') || name.includes('radar')) {
+          mixer.clipAction(clip).play();
+        }
+      }
+      mixers.push(mixer);
+      return { root, mixer };
+    }
+
+    function updateSoundButton() {
+      const btn = document.getElementById('btn-sound');
+      if (!btn) return;
+      btn.textContent = 'Sound: ' + (sound.enabled ? 'On' : 'Off');
+      btn.setAttribute('aria-pressed', String(sound.enabled));
+    }
+
+    function unlockAudio() {
+      if (!sound.listener || !sound.enabled) return;
+      const ctx = sound.listener.context;
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    }
+
+    function setSoundEnabled(on) {
+      sound.enabled = on;
+      try {
+        localStorage.setItem(SOUND_KEY, on ? 'on' : 'off');
+      } catch { /* private mode */ }
+      if (sound.listener) {
+        if (on) unlockAudio();
+        sound.listener.setMasterVolume(on ? sound.master : 0);
+      }
+      updateSoundButton();
+    }
+
+    function initAudio() {
+      try {
+        sound.listener = new THREE.AudioListener();
+        camera.add(sound.listener);
+        scene.add(camera);
+        sound.listener.setMasterVolume(sound.enabled ? sound.master : 0);
+      } catch (err) {
+        console.warn('Audio unavailable:', err);
+        sound.listener = null;
+      }
+      updateSoundButton();
+    }
+
+    async function loadSoundBuffers() {
+      if (!sound.listener) return;
+      const loader = new THREE.AudioLoader();
+      await Promise.all(Object.entries(SOUND_FILES).map(([key, url]) => new Promise((resolve) => {
+        loader.load(
+          url,
+          (buffer) => { sound.buffers[key] = buffer; resolve(); },
+          undefined,
+          (err) => { console.warn('Sound failed to load:', url, err); resolve(); },
+        );
+      })));
+    }
+
+    function makeEngineAudio(plane) {
+      if (!sound.listener) return null;
+      const key = plane.rotor
+        ? (plane.kind === 'heliPiston' ? 'prop' : 'jet')
+        : (plane.kind === 'jet' ? 'jet' : 'prop');
+      const buffer = sound.buffers[key];
+      if (!buffer) return null;
+      const audio = new THREE.PositionalAudio(sound.listener);
+      audio.setBuffer(buffer);
+      audio.setLoop(true);
+      audio.setRefDistance(plane.kind === 'jet' ? 70 : 45);
+      audio.setMaxDistance(800);
+      audio.setRolloffFactor(1);
+      audio.setDistanceModel('linear');
+      audio.setVolume(0);
+      audio.panner.panningModel = 'equalpower';
+      plane.root.add(audio);
+      try { audio.play(); } catch (err) { console.warn('Audio play failed:', err); }
+      return audio;
+    }
+
+    function makeTakeoffAudio(plane) {
+      if (!sound.listener || !sound.buffers.takeoff) return null;
+      const audio = new THREE.PositionalAudio(sound.listener);
+      audio.setBuffer(sound.buffers.takeoff);
+      audio.setLoop(false);
+      audio.setRefDistance(90);
+      audio.setMaxDistance(900);
+      audio.setRolloffFactor(1);
+      audio.setDistanceModel('linear');
+      audio.setVolume(0.9);
+      audio.panner.panningModel = 'equalpower';
+      plane.root.add(audio);
+      return audio;
+    }
+
+    function cellKey(cx, cz) { return `${cx},${cz}`; }
+
+    function footprint(def, cx, cz, yaw) {
+      const cells = [];
+      const w = def.w, d = def.d;
+      const rot = ((yaw % 4) + 4) % 4;
+      for (let i = 0; i < w; i++) {
+        for (let j = 0; j < d; j++) {
+          let x = i, z = j;
+          if (rot === 1) { x = j; z = i; }
+          if (rot === 2) { x = -i; z = -j; }
+          if (rot === 3) { x = -j; z = i; }
+          cells.push({ cx: cx + x, cz: cz + z });
+        }
+      }
+      return cells;
+    }
+
+    function worldOf(cx, cz) {
+      return {
+        x: (cx - GRID / 2) * CELL + CELL / 2,
+        z: (cz - GRID / 2) * CELL + CELL / 2,
+      };
+    }
+
+    function cellOf(x, z) {
+      const cx = Math.floor(x / CELL + GRID / 2);
+      const cz = Math.floor(z / CELL + GRID / 2);
+      return { cx, cz };
+    }
+
+    function canPlace(def, cx, cz, yaw) {
+      if (def.unique && state.buildings.some((b) => b.id === def.id)) return false;
+      const cells = footprint(def, cx, cz, yaw);
+      for (const c of cells) {
+        if (c.cx < 0 || c.cz < 0 || c.cx >= GRID || c.cz >= GRID) return false;
+        if (state.occupancy.has(cellKey(c.cx, c.cz))) return false;
+      }
+      return true;
+    }
+
+    function money(n) {
+      return '$' + Math.round(n).toLocaleString('en-US');
+    }
+
+    function log(text, cls = '') {
+      const el = document.getElementById('log');
+      const row = document.createElement('div');
+      row.className = 'row ' + cls;
+      row.textContent = text;
+      el.prepend(row);
+      while (el.children.length > 14) el.lastChild.remove();
+    }
+
+    function statsHtml() {
+      const cap = parkingCap();
+      const rw = runwayLength();
+      document.getElementById('stats').innerHTML = `
+        <div><span class="label">Pilot</span><strong>${account.user ? account.user.username : '—'}</strong></div>
+        <div><span class="label">Cash</span><strong>${money(state.cash)}</strong></div>
+        <div><span class="label">Day</span><strong>${state.day}</strong></div>
+        <div><span class="label">Traffic</span><strong>${state.aircraft.length}</strong></div>
+        <div><span class="label">Parking</span><strong>${cap}</strong></div>
+        <div><span class="label">Runway</span><strong>${rw} m</strong></div>
+        <div><span class="label">Demand</span><strong>${Math.round(demand() * 100)}%</strong></div>
+      `;
+    }
+
+    function parkingCap() {
+      return state.buildings.reduce((s, b) => s + (CATALOG.find((c) => c.id === b.id)?.parking || 0), 0);
+    }
+
+    function runwayLength() {
+      const slabs = state.buildings.filter((b) => b.id === 'runway' || b.id === 'threshold' || b.id === 'grass');
+      if (!slabs.length) return 0;
+      return slabs.reduce((s, b) => {
+        const d = CATALOG.find((c) => c.id === b.id);
+        return s + d.w * CELL;
+      }, 0);
+    }
+
+    function has(id) { return state.buildings.some((b) => b.id === id); }
+
+    function demand() {
+      const rw = runwayLength();
+      if (rw < 30) return 0;
+      let d = Math.min(1, rw / 400);
+      d += Math.min(0.35, parkingCap() * 0.04);
+      d += Math.min(0.2, heliPads().length * 0.08);
+      if (has('tower')) d += 0.18;
+      if (has('fuel')) d += 0.12;
+      if (has('club')) d += 0.1;
+      return Math.min(1.2, d);
+    }
+
+    function parkingSpots() {
+      const spots = [];
+      for (const b of state.buildings) {
+        const def = CATALOG.find((c) => c.id === b.id);
+        if (!def.parking || def.id === 'helipad') continue;
+        const w = worldOf(b.cx, b.cz);
+        for (let i = 0; i < def.parking; i++) {
+          spots.push({ x: w.x + (i % 2) * 6 - 3, z: w.z + Math.floor(i / 2) * 8, used: false, b });
+        }
+      }
+      return spots;
+    }
+
+    function heliPads() {
+      return state.buildings.filter((b) => b.id === 'helipad').map((b) => {
+        const w = worldOf(b.cx, b.cz);
+        return { x: w.x, z: w.z, b };
+      });
+    }
+
+    function runwayAxis() {
+      const slabs = state.buildings.filter((b) => b.id === 'runway' || b.id === 'threshold' || b.id === 'grass');
+      if (!slabs.length) return null;
+      slabs.sort((a, b) => a.cx - b.cx || a.cz - b.cz);
+      const a = slabs[0], z = slabs[slabs.length - 1];
+      const wa = worldOf(a.cx, a.cz), wz = worldOf(z.cx, z.cz);
+      const dx = wz.x - wa.x, dz = wz.z - wa.z;
+      const len = Math.hypot(dx, dz) || 30;
+      const heading = Math.atan2(dx, dz);
+      return { x: (wa.x + wz.x) / 2, z: (wa.z + wz.z) / 2, heading, len: Math.max(len, 30), start: wa, end: wz };
+    }
+
+    function taxiCellMap() {
+      const cells = new Map();
+      for (const b of state.buildings) {
+        if (!TAXI_IDS.has(b.id)) continue;
+        for (const c of b.cells) cells.set(cellKey(c.cx, c.cz), c);
+      }
+      return cells;
+    }
+
+    function nearestTaxiCell(cells, x, z) {
+      let best = null, bestD = Infinity;
+      for (const c of cells.values()) {
+        const p = worldOf(c.cx, c.cz);
+        const d = (p.x - x) ** 2 + (p.z - z) ** 2;
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      return best;
+    }
+
+    function taxiPath(fromX, fromZ, toX, toZ) {
+      const cells = taxiCellMap();
+      if (!cells.size) return null;
+      const start = nearestTaxiCell(cells, fromX, fromZ);
+      const goal = nearestTaxiCell(cells, toX, toZ);
+      if (!start || !goal) return null;
+      const startKey = cellKey(start.cx, start.cz);
+      const goalKey = cellKey(goal.cx, goal.cz);
+      const prev = new Map();
+      const seen = new Set([startKey]);
+      const queue = [startKey];
+      for (let i = 0; i < queue.length && !seen.has(goalKey); i++) {
+        const cell = cells.get(queue[i]);
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const key = cellKey(cell.cx + dx, cell.cz + dz);
+          if (!cells.has(key) || seen.has(key)) continue;
+          seen.add(key);
+          prev.set(key, queue[i]);
+          queue.push(key);
+        }
+      }
+      if (!seen.has(goalKey)) return null;
+      const path = [];
+      for (let key = goalKey; ; key = prev.get(key)) {
+        const cell = cells.get(key);
+        path.push(worldOf(cell.cx, cell.cz));
+        if (key === startKey) break;
+      }
+      path.reverse();
+      const last = path[path.length - 1];
+      if (Math.hypot(last.x - toX, last.z - toZ) > 0.5) path.push({ x: toX, z: toZ });
+      return path;
+    }
+
+    function angleDelta(target, current) {
+      let d = (target - current) % (Math.PI * 2);
+      if (d > Math.PI) d -= Math.PI * 2;
+      if (d < -Math.PI) d += Math.PI * 2;
+      return d;
+    }
+
+    function turnToward(current, target, step) {
+      const d = angleDelta(target, current);
+      return Math.abs(d) <= step ? target : current + Math.sign(d) * step;
+    }
+
+    function place(def, cx, cz, yaw) {
+      if (!canPlace(def, cx, cz, yaw)) return false;
+      if (state.cash < def.cost) {
+        log('Not enough cash for ' + def.name);
+        return false;
+      }
+      state.cash -= def.cost;
+      const cells = footprint(def, cx, cz, yaw);
+      for (const c of cells) state.occupancy.add(cellKey(c.cx, c.cz));
+      const { root, mixer } = cloneAsset(def.id);
+      const w = worldOf(cx, cz);
+      // Footprint centroid
+      let sx = 0, sz = 0;
+      for (const c of cells) {
+        const p = worldOf(c.cx, c.cz);
+        sx += p.x; sz += p.z;
+      }
+      root.position.set(sx / cells.length, 0, sz / cells.length);
+      root.rotation.y = yaw * Math.PI / 2;
+      scene.add(root);
+      const rec = { id: def.id, cx, cz, yaw, cells, root, mixer, cost: def.cost };
+      state.buildings.push(rec);
+      log('Built ' + def.name + '  −' + money(def.cost), 'money');
+      save();
+      statsHtml();
+      return true;
+    }
+
+    function demolishAt(cx, cz) {
+      const b = state.buildings.find((x) => x.cells.some((c) => c.cx === cx && c.cz === cz));
+      if (!b) return;
+      const refund = Math.round(b.cost * 0.5);
+      state.cash += refund;
+      for (const c of b.cells) state.occupancy.delete(cellKey(c.cx, c.cz));
+      scene.remove(b.root);
+      state.buildings = state.buildings.filter((x) => x !== b);
+      log('Demolished  +' + money(refund), 'money');
+      save();
+      statsHtml();
+    }
+
+    function yawLabel() {
+      const el = document.getElementById('yaw-label');
+      if (el) el.textContent = (state.yaw * 90) + '°';
+    }
+
+    function updateGhost() {
+      const def = CATALOG.find((c) => c.id === state.tool);
+      if (!def || state.demolish) {
+        setGhostAsset(null);
+        ghostRoot.visible = false;
+        return;
+      }
+      setGhostAsset(def.id);
+      const { cx, cz } = state.hover;
+      const ok = canPlace(def, cx, cz, state.yaw) && state.cash >= def.cost;
+      const cells = footprint(def, cx, cz, state.yaw);
+      let sx = 0, sz = 0;
+      for (const c of cells) {
+        const p = worldOf(c.cx, c.cz);
+        sx += p.x; sz += p.z;
+      }
+      ghostRoot.position.set(sx / cells.length, 0, sz / cells.length);
+      ghostRoot.rotation.y = state.yaw * Math.PI / 2;
+      ghostRoot.visible = true;
+      tintGhost(ok);
+      yawLabel();
+    }
+
+    function rotatePiece(steps = 1) {
+      state.yaw = (((state.yaw + steps) % 4) + 4) % 4;
+      updateGhost();
+      const def = CATALOG.find((c) => c.id === state.tool);
+      if (def) {
+        document.getElementById('msg').textContent = def.name + ' — heading ' + (state.yaw * 90) + '°. Click to place.';
+      }
+    }
+
+    function startOver() {
+      if (!confirm('Clear the field and start a new airport? This cannot be undone.')) return;
+      for (const a of state.aircraft) a.dispose();
+      for (const b of state.buildings) scene.remove(b.root);
+      state.aircraft = [];
+      state.buildings = [];
+      state.occupancy = new Set();
+      state.cash = START_CASH;
+      state.day = 1;
+      state.dayT = 0;
+      state.spawnT = 4;
+      state.yaw = 0;
+      state.tool = null;
+      state.demolish = false;
+      setGhostAsset(null);
+      ghostRoot.visible = false;
+      yawLabel();
+      renderCatalog();
+      statsHtml();
+      save();
+      log('New field. Cash reset to ' + money(START_CASH) + '.');
+    }
+
+    function serialize() {
+      return {
+        cash: state.cash,
+        day: state.day,
+        buildings: state.buildings.map((b) => ({ id: b.id, cx: b.cx, cz: b.cz, yaw: b.yaw, cost: b.cost })),
+      };
+    }
+
+    function setSaveStatus(text) {
+      const el = document.getElementById('save-status');
+      if (el) el.textContent = text;
+    }
+
+    function save() {
+      if (!account.user) return;
+      setSaveStatus('Saving…');
+      clearTimeout(account.saveTimer);
+      account.saveTimer = setTimeout(queueSave, 600);
+    }
+
+    function queueSave() {
+      account.saveChain = account.saveChain.then(pushSave, pushSave);
+      return account.saveChain;
+    }
+
+    async function pushSave() {
+      if (!account.user) return;
+      const body = JSON.stringify(serialize());
+      if (body === account.lastSaved) {
+        setSaveStatus('Saved');
+        return;
+      }
+      try {
+        const res = await fetch('/api/save', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        });
+        if (res.status === 401) {
+          location.replace('/login');
+          return;
+        }
+        if (!res.ok) throw new Error('save failed');
+        account.lastSaved = body;
+        setSaveStatus('Saved');
+      } catch {
+        setSaveStatus('Not saved');
+      }
+    }
+
+    function flushSave() {
+      if (!account.user) return;
+      clearTimeout(account.saveTimer);
+      const body = JSON.stringify(serialize());
+      if (body === account.lastSaved) return;
+      try {
+        fetch('/api/save', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          keepalive: true,
+        });
+        account.lastSaved = body;
+      } catch { /* page is closing */ }
+    }
+
+    window.addEventListener('pagehide', flushSave);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushSave();
+    });
+
+    function restoreMeshes() {
+      for (const b of state.buildings) {
+        const def = CATALOG.find((c) => c.id === b.id);
+        if (!def) continue;
+        const cells = footprint(def, b.cx, b.cz, b.yaw);
+        b.cells = cells;
+        for (const c of cells) state.occupancy.add(cellKey(c.cx, c.cz));
+        const { root, mixer } = cloneAsset(b.id);
+        let sx = 0, sz = 0;
+        for (const c of cells) {
+          const p = worldOf(c.cx, c.cz);
+          sx += p.x; sz += p.z;
+        }
+        root.position.set(sx / cells.length, 0, sz / cells.length);
+        root.rotation.y = b.yaw * Math.PI / 2;
+        scene.add(root);
+        b.root = root;
+        b.mixer = mixer;
+      }
+    }
+
+    function applySave(data) {
+      state.cash = typeof data.cash === 'number' ? data.cash : state.cash;
+      state.day = Number.isInteger(data.day) ? data.day : 1;
+      state.buildings = (Array.isArray(data.buildings) ? data.buildings : []).map((b) => ({
+        ...b,
+        cells: [],
+        root: null,
+      }));
+    }
+
+    class Plane {
+      constructor(kind) {
+        this.id = CALLS[Math.floor(Math.random() * CALLS.length)] + '-' + Math.floor(Math.random() * 90);
+        this.kind = kind;
+        this.rotor = HELI_FLEET.includes(kind);
+        const { root, mixer } = cloneAsset(kind);
+        this.root = root;
+        this.mixer = mixer;
+        this.heading = 0;
+        this.speed = 0;
+        this.t = 0;
+        this.spot = null;
+        this.path = null;
+        this.pathIndex = 0;
+        this.paid = false;
+        this.audioLevel = 0;
+        this.audioRate = 1;
+        scene.add(root);
+        this.audio = makeEngineAudio(this);
+        this.fx = null;
+        if (this.kind === 'jet') this.fx = makeTakeoffAudio(this);
+        if (this.rotor) {
+          const pads = heliPads();
+          const taken = new Set(state.aircraft.filter((a) => a.rotor && a.spot).map((a) => a.spot.x + ',' + a.spot.z));
+          this.spot = pads.find((s) => !taken.has(s.x + ',' + s.z)) || pads[0] || null;
+          this.heading = Math.random() * Math.PI * 2;
+          const tx = this.spot ? this.spot.x : 0;
+          const tz = this.spot ? this.spot.z : 0;
+          this.x = tx - Math.sin(this.heading) * 160;
+          this.z = tz - Math.cos(this.heading) * 160;
+          this.y = 50;
+          this.mode = 'heli-in';
+          this.root.rotation.x = 0;
+          log(this.id + ' helicopter inbound');
+        } else {
+          this.y = 80;
+          this.mode = 'approach';
+          const rw = runwayAxis();
+          const h = rw ? rw.heading : 0;
+          this.heading = h;
+          const back = 420;
+          this.x = (rw ? rw.start.x : 0) - Math.sin(h) * back;
+          this.z = (rw ? rw.start.z : 0) - Math.cos(h) * back;
+          this.root.rotation.x = -0.08;
+          log(this.id + ' inbound');
+        }
+        this.root.position.set(this.x, this.y, this.z);
+        this.root.rotation.y = this.heading;
+      }
+      updateHeli(dt) {
+        const pad = this.spot;
+        if (this.mode === 'heli-in' && pad) {
+          const dx = pad.x - this.x, dz = pad.z - this.z;
+          const dist = Math.hypot(dx, dz);
+          this.heading = Math.atan2(dx, dz);
+          this.speed = 22;
+          this.x += Math.sin(this.heading) * this.speed * dt;
+          this.z += Math.cos(this.heading) * this.speed * dt;
+          this.y = Math.max(0.04, dist * 0.28);
+          if (dist < 4) { this.mode = 'heli-down'; this.t = 0; }
+        } else if (this.mode === 'heli-down') {
+          this.y = Math.max(0.04, this.y - 8 * dt);
+          if (this.y <= 0.05) {
+            this.mode = 'park';
+            this.t = 0;
+            if (!this.paid) {
+              const fee = 380 + (this.kind === 'heliAmb' ? 240 : this.kind === 'heliTurbine' ? 160 : 0);
+              const fuel = has('fuel') ? 110 + Math.random() * 90 : 0;
+              state.cash += fee + fuel;
+              this.paid = true;
+              log(this.id + ' pad fee ' + money(fee + fuel), 'money');
+              statsHtml();
+            }
+          }
+        } else if (this.mode === 'park') {
+          if (this.t > 8) { this.mode = 'heli-up'; this.t = 0; }
+        } else if (this.mode === 'heli-up') {
+          this.y += 12 * dt;
+          if (this.y > 16) this.mode = 'heli-out';
+        } else if (this.mode === 'heli-out') {
+          this.speed = 28;
+          this.y += 8 * dt;
+          this.x += Math.sin(this.heading) * this.speed * dt;
+          this.z += Math.cos(this.heading) * this.speed * dt;
+          if (this.y > 90 || this.t > 16) this.mode = 'gone';
+        }
+        this.root.position.set(this.x, this.y, this.z);
+        this.root.rotation.y = this.heading;
+        this.root.rotation.x = 0;
+      }
+      playTakeoff() {
+        if (!this.fx) return;
+        try {
+          if (this.fx.isPlaying) this.fx.stop();
+          this.fx.setVolume(0.9);
+          this.fx.play();
+        } catch { /* audio unavailable */ }
+      }
+      updateAudio(dt) {
+        if (!this.audio) return;
+        let vol = 0.25;
+        let rate = 1;
+        if (this.rotor) {
+          const turbine = this.kind !== 'heliPiston';
+          vol = this.mode === 'park' ? 0.24 : 0.5;
+          rate = (turbine ? 1.45 : 1.3) + (this.mode.startsWith('heli-') ? 0.08 : 0);
+        } else if (this.kind === 'jet') {
+          if (this.mode === 'approach') { vol = 0.5; rate = 1.03; }
+          else if (this.mode === 'roll') { vol = 0.72; rate = 1.08; }
+          else if (this.mode === 'taxi') { vol = 0.34; rate = 1.0; }
+          else if (this.mode === 'park') { vol = 0.24; rate = 0.98; }
+          else if (this.mode === 'taxi-out') { vol = 0.38; rate = 1.02; }
+          else if (this.mode === 'lineup') { vol = 0.6; rate = 1.1; }
+          else if (this.mode === 'depart') { vol = 0.85; rate = 1.16 + Math.min(0.3, this.speed / 180); }
+        } else {
+          if (this.mode === 'approach') { vol = 0.45; rate = 1.03; }
+          else if (this.mode === 'roll') { vol = 0.7; rate = 1.12; }
+          else if (this.mode === 'taxi') { vol = 0.34; rate = 1.02; }
+          else if (this.mode === 'park') { vol = 0.22; rate = 0.96; }
+          else if (this.mode === 'taxi-out') { vol = 0.38; rate = 1.04; }
+          else if (this.mode === 'lineup') { vol = 0.58; rate = 1.12; }
+          else if (this.mode === 'depart') { vol = 0.85; rate = 1.2 + Math.min(0.35, this.speed / 160); }
+        }
+        const k = 1 - Math.exp(-dt * 5);
+        this.audioLevel += (vol - this.audioLevel) * k;
+        this.audioRate += (rate - this.audioRate) * k;
+        this.audio.setVolume(this.audioLevel);
+        this.audio.setPlaybackRate(this.audioRate);
+      }
+      followPath(dt) {
+        if (!this.path) return false;
+        while (this.pathIndex < this.path.length) {
+          const target = this.path[this.pathIndex];
+          const dx = target.x - this.x, dz = target.z - this.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > 0.8) {
+            const desired = Math.atan2(dx, dz);
+            const diff = angleDelta(desired, this.heading);
+            if (Math.abs(diff) > 0.35) {
+              this.speed = 0;
+              this.heading = turnToward(this.heading, desired, 2.8 * dt);
+            } else {
+              this.speed = 8;
+              this.heading = turnToward(this.heading, desired, 4 * dt);
+              this.x += (dx / dist) * this.speed * dt;
+              this.z += (dz / dist) * this.speed * dt;
+            }
+            this.y = 0.04;
+            return true;
+          }
+          this.pathIndex += 1;
+        }
+        this.speed = 0;
+        return false;
+      }
+      update(dt) {
+        this.t += dt;
+        if (this.rotor) { this.updateHeli(dt); this.updateAudio(dt); return; }
+        const rw = runwayAxis();
+        if (this.mode === 'approach' && rw) {
+          this.speed = 48;
+          const tx = rw.start.x, tz = rw.start.z;
+          const dx = tx - this.x, dz = tz - this.z;
+          this.heading = Math.atan2(dx, dz);
+          this.x += Math.sin(this.heading) * this.speed * dt;
+          this.z += Math.cos(this.heading) * this.speed * dt;
+          const dist = Math.hypot(dx, dz);
+          this.y = Math.max(0.04, dist * 0.18);
+          if (dist < 18) {
+            this.mode = 'roll';
+            this.y = 0.04;
+            this.speed = 22;
+            this.root.rotation.x = 0;
+            if (!this.paid) {
+              const fee = 280 + (this.kind === 'jet' ? 900 : this.kind === 'twin' ? 420 : 120);
+              const fuel = has('fuel') ? 160 + Math.random() * 220 : 0;
+              state.cash += fee + fuel;
+              this.paid = true;
+              log(this.id + ' landing fee ' + money(fee + fuel), 'money');
+              statsHtml();
+            }
+          }
+        } else if (this.mode === 'roll') {
+          this.speed = Math.max(6, this.speed - 8 * dt);
+          this.x += Math.sin(this.heading) * this.speed * dt;
+          this.z += Math.cos(this.heading) * this.speed * dt;
+          const pastEnd = rw && (this.x - rw.start.x) * Math.sin(rw.heading) + (this.z - rw.start.z) * Math.cos(rw.heading) > rw.len;
+          if (this.t > 9 || this.speed <= 6.2 || pastEnd) {
+            const spots = parkingSpots();
+            const taken = new Set(state.aircraft.filter((a) => a.spot).map((a) => a.spot.x + ',' + a.spot.z));
+            this.spot = spots.find((s) => !taken.has(s.x + ',' + s.z)) || null;
+            this.path = this.spot ? taxiPath(this.x, this.z, this.spot.x, this.spot.z) : null;
+            this.pathIndex = 0;
+            this.mode = this.spot && this.path ? 'taxi' : 'lineup';
+            this.t = 0;
+          }
+        } else if (this.mode === 'taxi') {
+          if (!this.followPath(dt)) {
+            this.mode = 'park';
+            this.t = 0;
+            if (has('hangar') || has('tHangar')) {
+              state.cash += 90;
+              statsHtml();
+            }
+          }
+        } else if (this.mode === 'taxi-out') {
+          if (!this.followPath(dt)) {
+            this.mode = 'lineup';
+            this.t = 0;
+          }
+        } else if (this.mode === 'lineup') {
+          if (!rw) {
+            this.mode = 'depart';
+            this.t = 0;
+            this.playTakeoff();
+          } else {
+            this.speed = 0;
+            this.y = 0.04;
+            this.heading = turnToward(this.heading, rw.heading, 2.8 * dt);
+            if (Math.abs(angleDelta(rw.heading, this.heading)) < 0.04) {
+              this.mode = 'depart';
+              this.t = 0;
+              this.playTakeoff();
+            }
+          }
+        } else if (this.mode === 'park') {
+          if (this.t > 7) {
+            this.path = rw ? taxiPath(this.x, this.z, rw.start.x, rw.start.z) : null;
+            this.pathIndex = 0;
+            this.mode = this.path ? 'taxi-out' : 'lineup';
+            this.t = 0;
+          }
+        } else if (this.mode === 'depart') {
+          this.speed = Math.min(55, this.speed + 14 * dt);
+          this.x += Math.sin(this.heading) * this.speed * dt;
+          this.z += Math.cos(this.heading) * this.speed * dt;
+          if (this.speed > 38) this.y += 18 * dt;
+          if (this.y > 90 || this.t > 18) this.mode = 'gone';
+        }
+        this.root.position.set(this.x, this.y, this.z);
+        this.root.rotation.y = this.heading;
+        if (this.y > 1) this.root.rotation.x = -0.06;
+        this.updateAudio(dt);
+      }
+      dispose() {
+        if (this.fx) {
+          try { this.fx.stop(); } catch { /* already stopped */ }
+          this.fx.disconnect();
+          this.fx = null;
+        }
+        if (this.audio) {
+          try { this.audio.stop(); } catch { /* already stopped */ }
+          this.audio.disconnect();
+          this.audio = null;
+        }
+        scene.remove(this.root);
+      }
+    }
+
+    function spawnTraffic() {
+      const pads = heliPads();
+      const helis = state.aircraft.filter((a) => a.rotor).length;
+      if (pads.length && helis < pads.length && Math.random() < 0.7) {
+        const kind = HELI_FLEET[Math.floor(Math.random() * HELI_FLEET.length)];
+        state.aircraft.push(new Plane(kind));
+        return;
+      }
+      if (!runwayAxis()) return;
+      const cap = Math.max(1, parkingCap() + (has('tower') ? 2 : 0));
+      const wings = state.aircraft.filter((a) => !a.rotor).length;
+      if (wings >= Math.min(8, cap + 2)) return;
+      if (Math.random() > demand()) return;
+      const kind = FLEET[Math.floor(Math.random() * FLEET.length)];
+      if (kind === 'jet' && runwayLength() < 90) return;
+      state.aircraft.push(new Plane(kind));
+    }
+
+    function dayTick() {
+      state.day += 1;
+      let upkeep = 80 + state.buildings.length * 18;
+      if (has('tower')) upkeep += 120;
+      state.cash -= upkeep;
+      const rent = parkingCap() * 35;
+      state.cash += rent;
+      log('Day ' + state.day + '  rent ' + money(rent) + '  upkeep −' + money(upkeep), 'money');
+      if (state.cash < 0) {
+        log('The field is in the red.');
+      }
+      save();
+      statsHtml();
+    }
+
+    function renderCatalog() {
+      const el = document.getElementById('catalog');
+      el.innerHTML = '<h2>Build</h2>';
+      for (const def of CATALOG) {
+        const b = document.createElement('button');
+        b.className = 'tool' + (state.tool === def.id ? ' active' : '');
+        b.innerHTML = `<span>${def.name}<div class="hint">${def.hint}</div></span><span class="cost">${money(def.cost)}</span>`;
+        b.onclick = () => {
+          state.demolish = false;
+          state.tool = state.tool === def.id ? null : def.id;
+          document.getElementById('msg').textContent = def.name + ' — click the field. Rotate or R turns it.';
+          renderCatalog();
+          updateGhost();
+        };
+        el.appendChild(b);
+      }
+      const d = document.createElement('button');
+      d.className = 'tool' + (state.demolish ? ' active' : '');
+      d.innerHTML = '<span>Demolish<div class="hint">50% refund</div></span>';
+      d.onclick = () => {
+        state.demolish = !state.demolish;
+        state.tool = null;
+        document.getElementById('msg').textContent = 'Click a building to remove it.';
+        renderCatalog();
+        updateGhost();
+      };
+      el.appendChild(d);
+    }
+
+    function pickCell(ev) {
+      pointer.x = (ev.clientX / innerWidth) * 2 - 1;
+      pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      raycaster.ray.intersectPlane(groundPlane, hit);
+      return cellOf(hit.x, hit.z);
+    }
+
+    renderer.domElement.addEventListener('pointermove', (ev) => {
+      state.hover = pickCell(ev);
+      updateGhost();
+    });
+
+    renderer.domElement.addEventListener('pointerdown', (ev) => {
+      if (ev.button === 2) {
+        ev.preventDefault();
+        rotatePiece(1);
+        return;
+      }
+      if (ev.button !== 0) return;
+      const { cx, cz } = pickCell(ev);
+      state.hover = { cx, cz };
+      if (state.demolish) {
+        demolishAt(cx, cz);
+        return;
+      }
+      const def = CATALOG.find((c) => c.id === state.tool);
+      if (!def) return;
+      place(def, cx, cz, state.yaw);
+    });
+
+    renderer.domElement.addEventListener('contextmenu', (ev) => ev.preventDefault());
+
+    window.addEventListener('keydown', (ev) => {
+      if (ev.code === 'KeyR' || ev.code === 'KeyE') { ev.preventDefault(); rotatePiece(1); }
+      if (ev.code === 'KeyQ') { ev.preventDefault(); rotatePiece(-1); }
+      if (ev.code === 'Escape') { state.tool = null; state.demolish = false; updateGhost(); renderCatalog(); }
+      if (ev.code === 'Space') { ev.preventDefault(); state.paused = !state.paused; }
+      if (ev.code === 'KeyM' && !ev.repeat) { ev.preventDefault(); setSoundEnabled(!sound.enabled); }
+    });
+
+    window.addEventListener('pointerdown', unlockAudio, { passive: true });
+    window.addEventListener('keydown', unlockAudio, { passive: true });
+
+    document.getElementById('btn-sound').onclick = () => setSoundEnabled(!sound.enabled);
+    document.getElementById('btn-rotate').onclick = () => rotatePiece(1);
+    document.getElementById('btn-reset').onclick = () => startOver();
+    document.getElementById('btn-logout').onclick = async () => {
+      if (!confirm('Log out? Your airport is saved to your account.')) return;
+      clearTimeout(account.saveTimer);
+      await queueSave();
+      await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+      location.replace('/login');
+    };
+
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    let last = performance.now();
+    function frame(now) {
+      requestAnimationFrame(frame);
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      controls.update();
+      for (const m of mixers) m.update(dt);
+      if (!state.paused) {
+        state.dayT += dt;
+        if (state.dayT > 18) { state.dayT = 0; dayTick(); }
+        state.spawnT -= dt;
+        if (state.spawnT <= 0) {
+          state.spawnT = 6 + Math.random() * 8;
+          spawnTraffic();
+        }
+        for (const a of state.aircraft) a.update(dt);
+        for (const a of state.aircraft.filter((p) => p.mode === 'gone')) a.dispose();
+        state.aircraft = state.aircraft.filter((p) => p.mode !== 'gone');
+      }
+      renderer.render(scene, camera);
+    }
+
+    async function boot() {
+      const sessionRes = await fetch('/api/session', { credentials: 'same-origin' });
+      if (!sessionRes.ok) {
+        location.replace('/login');
+        return;
+      }
+      const sessionData = await sessionRes.json();
+      account.user = sessionData.user;
+
+      const saveRes = await fetch('/api/save', { credentials: 'same-origin' });
+      if (!saveRes.ok) {
+        location.replace('/login');
+        return;
+      }
+      const saved = await saveRes.json();
+      if (saved.save) {
+        applySave(saved.save);
+      } else {
+        const legacy = localStorage.getItem(LEGACY_SAVE_KEY);
+        if (legacy) {
+          try {
+            applySave(JSON.parse(legacy));
+            localStorage.removeItem(LEGACY_SAVE_KEY);
+            save();
+          } catch { /* ignore old save */ }
+        }
+      }
+
+      initAudio();
+      const keys = Object.keys(ASSETS);
+      let n = 0;
+      await Promise.all([
+        loadSoundBuffers(),
+        ...keys.map(async (k) => {
+          gltfs[k] = await loadGLTF(ASSETS[k]);
+          n += 1;
+          document.getElementById('loading').textContent = `Loading airfield kit… ${n}/${keys.length}`;
+        }),
+      ]);
+      restoreMeshes();
+      renderCatalog();
+      statsHtml();
+      yawLabel();
+      document.getElementById('loading').classList.add('hide');
+      setSaveStatus(saved.save ? 'Saved' : 'New field');
+      log(`Welcome, ${account.user.username}. Lay pavement, then parking.`);
+      requestAnimationFrame(frame);
+    }
+
+    boot().catch((err) => {
+      document.getElementById('loading').textContent = 'Failed to load assets: ' + err.message;
+    });
+
+    window.tycoon = { state, scene, camera, sound };
+  </script>
+</body>
+</html>

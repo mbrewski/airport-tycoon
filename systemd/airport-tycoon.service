@@ -1,0 +1,18 @@
+[Unit]
+Description=Small airport tycoon (http://0.0.0.0:8130/)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/develop/airport-tycoon
+ExecStart=%h/develop/airport-tycoon/venv/bin/python %h/develop/airport-tycoon/app.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
+Environment=PORT=8130
+
+[Install]
+WantedBy=default.target

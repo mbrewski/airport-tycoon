@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in · Small Airport Tycoon</title>
+  <style>
+    :root {
+      --ink: #e8f0ea;
+      --muted: #8aa090;
+      --panel: rgba(10, 18, 14, 0.86);
+      --line: #2a3d30;
+      --ok: #7dcc7a;
+      --bad: #e07a6a;
+      --gold: #e6c36a;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      display: grid; place-items: center; padding: 24px;
+      background:
+        radial-gradient(ellipse at 20% 0%, #173222 0%, transparent 55%),
+        radial-gradient(ellipse at 90% 100%, #14281c 0%, transparent 50%),
+        #0b140f;
+      color: var(--ink);
+      font: 14px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
+    }
+    .card {
+      width: min(420px, 100%);
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+      padding: 26px 28px 24px; backdrop-filter: blur(8px);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+    }
+    h1 { margin: 0; font-size: 21px; letter-spacing: 0.01em; }
+    .sub { margin: 6px 0 20px; color: var(--muted); }
+    .tabs {
+      display: flex; gap: 6px; margin-bottom: 18px;
+      background: rgba(0, 0, 0, 0.22); border: 1px solid var(--line);
+      border-radius: 10px; padding: 4px;
+    }
+    .tab {
+      flex: 1; padding: 8px 10px; border: 0; border-radius: 7px;
+      background: transparent; color: var(--muted); font: inherit; cursor: pointer;
+    }
+    .tab:hover { color: var(--ink); }
+    .tab.active { background: rgba(125, 204, 122, 0.14); color: var(--ink); }
+    label { display: block; margin-bottom: 14px; color: var(--muted); font-size: 12px; }
+    label span { display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.08em; }
+    input {
+      width: 100%; padding: 10px 12px; border-radius: 8px;
+      border: 1px solid var(--line); background: rgba(0, 0, 0, 0.25);
+      color: var(--ink); font: inherit; outline: none;
+    }
+    input:focus { border-color: var(--ok); box-shadow: 0 0 0 2px rgba(125, 204, 122, 0.16); }
+    .primary {
+      width: 100%; margin-top: 4px; padding: 11px 14px;
+      border: 1px solid var(--ok); border-radius: 9px;
+      background: rgba(125, 204, 122, 0.14); color: var(--ink);
+      font: inherit; font-weight: 600; cursor: pointer;
+    }
+    .primary:hover { background: rgba(125, 204, 122, 0.22); }
+    .primary:disabled { opacity: 0.55; cursor: wait; }
+    .error { min-height: 1.45em; margin: 12px 0 0; color: var(--bad); font-size: 12px; }
+    .hint { margin: 16px 0 0; color: var(--muted); font-size: 12px; }
+    .hint b { color: var(--gold); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Small Airport Tycoon</h1>
+    <p class="sub">Sign in to build and save your field.</p>
+
+    <div class="tabs" role="tablist" aria-label="Account">
+      <button type="button" class="tab active" id="tab-login" role="tab" aria-selected="true">Sign in</button>
+      <button type="button" class="tab" id="tab-register" role="tab" aria-selected="false">Create account</button>
+    </div>
+
+    <form id="form" novalidate>
+      <label>
+        <span>Username</span>
+        <input id="username" name="username" required minlength="3" maxlength="32"
+               pattern="[A-Za-z0-9._\-]+" autocomplete="username"
+               autocapitalize="none" spellcheck="false" />
+      </label>
+      <label>
+        <span>Password</span>
+        <input id="password" name="password" type="password" required minlength="8"
+               maxlength="200" autocomplete="current-password" />
+      </label>
+      <label id="confirm-row" hidden>
+        <span>Confirm password</span>
+        <input id="confirm" name="confirm" type="password" minlength="8" maxlength="200"
+               autocomplete="new-password" />
+      </label>
+      <button class="primary" id="submit" type="submit">Sign in</button>
+      <p class="error" id="error" role="alert" aria-live="polite"></p>
+    </form>
+
+    <p class="hint" id="mode-hint">New here? Choose <b>Create account</b>. Signup is open.</p>
+  </main>
+
+  <script type="module">
+    let mode = 'login';
+    const form = document.getElementById('form');
+    const username = document.getElementById('username');
+    const password = document.getElementById('password');
+    const confirm = document.getElementById('confirm');
+    const confirmRow = document.getElementById('confirm-row');
+    const errorEl = document.getElementById('error');
+    const submit = document.getElementById('submit');
+    const hint = document.getElementById('mode-hint');
+    const tabLogin = document.getElementById('tab-login');
+    const tabRegister = document.getElementById('tab-register');
+
+    function setMode(next) {
+      mode = next;
+      const registering = mode === 'register';
+      tabLogin.classList.toggle('active', !registering);
+      tabRegister.classList.toggle('active', registering);
+      tabLogin.setAttribute('aria-selected', String(!registering));
+      tabRegister.setAttribute('aria-selected', String(registering));
+      confirmRow.hidden = !registering;
+      confirm.required = registering;
+      password.autocomplete = registering ? 'new-password' : 'current-password';
+      submit.textContent = registering ? 'Create account' : 'Sign in';
+      hint.innerHTML = registering
+        ? 'Already have an account? Choose <b>Sign in</b>.'
+        : 'New here? Choose <b>Create account</b>. Signup is open.';
+      errorEl.textContent = '';
+    }
+
+    tabLogin.addEventListener('click', () => setMode('login'));
+    tabRegister.addEventListener('click', () => setMode('register'));
+
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      errorEl.textContent = '';
+      const name = username.value.trim();
+      if (!/^[A-Za-z0-9._-]{3,32}$/.test(name)) {
+        errorEl.textContent = 'Username: 3-32 letters, numbers, . _ -';
+        return;
+      }
+      if (password.value.length < 8) {
+        errorEl.textContent = 'Password: at least 8 characters.';
+        return;
+      }
+      if (mode === 'register' && password.value !== confirm.value) {
+        errorEl.textContent = 'Passwords do not match.';
+        return;
+      }
+
+      submit.disabled = true;
+      try {
+        const res = await fetch(mode === 'register' ? '/api/register' : '/api/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: name, password: password.value }),
+        });
+        let body = {};
+        try { body = await res.json(); } catch { /* ignore */ }
+        if (!res.ok) {
+          errorEl.textContent = body.error || `Could not ${mode === 'register' ? 'create the account' : 'sign in'}.`;
+          return;
+        }
+        location.replace('/');
+      } catch {
+        errorEl.textContent = 'Network error. Try again.';
+      } finally {
+        submit.disabled = false;
+      }
+    });
+
+    setMode('login');
+    username.focus();
+  </script>
+</body>
+</html>
